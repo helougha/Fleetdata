@@ -10,13 +10,13 @@
  * Apps Script may NOT reliably read those displayed colors.
  * This works reliably when the color is actually set on the cell.
  *
- * Adjustments applied:
- * - Window-based threshold checking (catches alerts even if trigger skips a day)
- * - Math.floor instead of Math.round for DST-safe day counting
- * - try/catch around each email send so one failure doesn't abort the rest
- * - Duplicate-run guard using ScriptProperties (prevents double emails if trigger fires twice)
- * - Notification log sheet for audit trail
- * - onOpen menu + trigger helper functions
+ * Email sections:
+ * - PAST GRACE PERIOD — expired more than 30 days ago
+ * - IN GRACE PERIOD   — expired within last 30 days
+ * - UNDER INSPECTION  — yellow-highlighted date cells
+ * - CLOSE TO EXPIRY   — expires within next 30 days
+ *
+ * Each line: Reg# — Model — Document Type — days left/overdue
  */
 
 // ============================================================
@@ -144,13 +144,7 @@ function sendExpiryReminders() {
   }
 
   const SHEET_NAME = "SCC"; // <-- CHANGE to your exact tab name
-
-  // --- ADJUSTMENT 1: Window-based thresholds ---
-  // Instead of only alerting on exact days [30, 14, 7, 1], we alert when
-  // daysLeft falls within a window. This catches alerts even if the trigger
-  // misses a day. The windows are: <=30 & >14, <=14 & >7, <=7 & >1, <=1 & >0.
-  // Each document is tagged with the highest threshold it crossed today.
-  const THRESHOLDS = [30, 14, 7, 1]; // sorted descending
+  const GRACE_PERIOD_DAYS = 30; // days after expiry before "past grace period"
 
   // Emails that receive reminders:
   const DEFAULT_RECIPIENTS = ["elhelou.ghazi@sarooj.com"]; // <-- CHANGE / add more
@@ -172,8 +166,6 @@ function sendExpiryReminders() {
   const iExpiry = idx("Expiry Date");
   const iInspection = idx("Inspection Exp.Date");
   const iModel = idx("Model");
-  const iPlant = idx("Plant Code :");
-  const iLocation = idx("Location");
 
   ["Reg #", "Expiry Date"].forEach(function(col) {
     if (idx(col) === -1) throw new Error("Missing required column: " + col);
@@ -196,7 +188,7 @@ function sendExpiryReminders() {
     inspFont = sheet.getRange(2, iInspection + 1, lastRow - 1, 1).getFontColors();
   }
 
-  // Group reminders per recipient
+  // Collect all items per recipient
   var perRecipient = new Map();
   var addItem = function(email, item) {
     var e = String(email || "").trim();
@@ -205,37 +197,7 @@ function sendExpiryReminders() {
     perRecipient.get(e).push(item);
   };
 
-  // Track "under inspection" warnings per recipient
-  var underInspectionByRecipient = new Map();
-  var addUnderInspection = function(email, msg) {
-    var e = String(email || "").trim();
-    if (!e) return;
-    if (!underInspectionByRecipient.has(e)) underInspectionByRecipient.set(e, []);
-    underInspectionByRecipient.get(e).push(msg);
-  };
-
-  /**
-   * Determines the active threshold bracket for a given daysLeft value.
-   * Returns the threshold number (30, 14, 7, 1) or null if daysLeft > 30.
-   * This is the window-based replacement for the old exact-match check.
-   */
-  var getThresholdBracket = function(daysLeft) {
-    if (daysLeft < 0) return null; // overdue handled separately
-    for (var t = 0; t < THRESHOLDS.length; t++) {
-      if (daysLeft <= THRESHOLDS[t]) {
-        // daysLeft is within this threshold window
-        // but we want the tightest matching bracket
-        continue;
-      } else {
-        // daysLeft > THRESHOLDS[t], so the previous threshold was the bracket
-        return t > 0 ? THRESHOLDS[t - 1] : null;
-      }
-    }
-    // daysLeft <= smallest threshold (1)
-    return THRESHOLDS[THRESHOLDS.length - 1];
-  };
-
-  var evaluateDateField = function(dateRaw, docLabel, reg, model, plant, location) {
+  var evaluateDateField = function(dateRaw, docLabel, reg, model, isUnderInspection) {
     if (!dateRaw) return null;
 
     var d;
@@ -247,24 +209,17 @@ function sendExpiryReminders() {
     if (isNaN(d.getTime())) return null;
     d.setHours(0, 0, 0, 0);
 
-    // ADJUSTMENT 3: Math.floor instead of Math.round for DST safety
     var daysLeft = Math.floor((d - today) / (1000 * 60 * 60 * 24));
 
-    var isOverdue = daysLeft < 0;
-    var bracket = getThresholdBracket(daysLeft);
-
-    // ADJUSTMENT 1: notify if within any threshold bracket OR overdue
-    if (!bracket && !isOverdue) return null;
+    // Include anything expired or within 30 days of expiry
+    if (daysLeft > 30) return null;
 
     return {
       reg: reg,
       model: model,
-      plant: plant,
-      location: location,
       doc: docLabel,
-      date: Utilities.formatDate(d, tz, "yyyy-MM-dd"),
       daysLeft: daysLeft,
-      bracket: bracket // which threshold window this falls in (30, 14, 7, 1, or null if overdue)
+      underInspection: isUnderInspection || false
     };
   };
 
@@ -275,8 +230,6 @@ function sendExpiryReminders() {
     if (!reg) continue;
 
     var model = (iModel !== -1 && row[iModel]) ? String(row[iModel]).trim() : "";
-    var plant = (iPlant !== -1 && row[iPlant]) ? String(row[iPlant]).trim() : "";
-    var location = (iLocation !== -1 && row[iLocation]) ? String(row[iLocation]).trim() : "";
 
     var rowIdx = r - 1; // formatting arrays start at row 2
 
@@ -293,68 +246,99 @@ function sendExpiryReminders() {
 
     var expItem = expiryFontIsRed
       ? null
-      : evaluateDateField(row[iExpiry], "Expiry Date", reg, model, plant, location);
+      : evaluateDateField(row[iExpiry], "Expiry Date", reg, model, expiryBgIsYellow);
 
     var inspItem = (iInspection !== -1 && !inspFontIsRed)
-      ? evaluateDateField(row[iInspection], "Inspection Exp.Date", reg, model, plant, location)
+      ? evaluateDateField(row[iInspection], "Inspection Exp.Date", reg, model, inspBgIsYellow)
       : null;
 
-    // Send everything to the default recipients list
     for (var ri = 0; ri < DEFAULT_RECIPIENTS.length; ri++) {
       var email = DEFAULT_RECIPIENTS[ri];
-      if (expItem) {
-        addItem(email, expItem);
-        if (expiryBgIsYellow) {
-          addUnderInspection(email, "Reg: " + reg + " \u2014 Expiry Date (" + expItem.date + ") \u2014 UNDER INSPECTION");
-        }
-      }
-      if (inspItem) {
-        addItem(email, inspItem);
-        if (inspBgIsYellow) {
-          addUnderInspection(email, "Reg: " + reg + " \u2014 Inspection Exp.Date (" + inspItem.date + ") \u2014 UNDER INSPECTION");
-        }
-      }
+      if (expItem) addItem(email, expItem);
+      if (inspItem) addItem(email, inspItem);
     }
   }
 
-  // --- Send emails ---
+  // --- Build & send emails ---
   for (var entry of perRecipient.entries()) {
     var recipientEmail = entry[0];
     var items = entry[1];
 
-    items.sort(function(a, b) { return a.daysLeft - b.daysLeft; }); // overdue first
+    // Sort into 4 buckets:
+    //   1. PAST GRACE PERIOD  — expired more than 30 days ago (daysLeft < -30)
+    //   2. IN GRACE PERIOD    — expired within last 30 days (-30 <= daysLeft <= 0)
+    //   3. UNDER INSPECTION   — yellow-highlighted cells (any daysLeft)
+    //   4. CLOSE TO EXPIRY    — not yet expired, within 30 days (1 <= daysLeft <= 30)
+    var pastGrace = [];
+    var inGrace = [];
+    var underInspection = [];
+    var closeToExpiry = [];
 
-    var subject = "Fleet paperwork reminders (" + items.length + ")";
+    for (var j = 0; j < items.length; j++) {
+      var it = items[j];
+      if (it.underInspection) {
+        underInspection.push(it);
+      } else if (it.daysLeft < -30) {
+        pastGrace.push(it);
+      } else if (it.daysLeft <= 0) {
+        inGrace.push(it);
+      } else {
+        closeToExpiry.push(it);
+      }
+    }
 
-    var lines = items.map(function(it) {
-      var tag = it.daysLeft < 0
-        ? "OVERDUE by " + Math.abs(it.daysLeft) + " day(s)"
-        : it.daysLeft + " day(s) left";
+    // Sort each bucket by urgency (most urgent first)
+    pastGrace.sort(function(a, b) { return a.daysLeft - b.daysLeft; });
+    inGrace.sort(function(a, b) { return a.daysLeft - b.daysLeft; });
+    underInspection.sort(function(a, b) { return a.daysLeft - b.daysLeft; });
+    closeToExpiry.sort(function(a, b) { return a.daysLeft - b.daysLeft; });
 
-      var meta = [
-        it.model ? "Model: " + it.model : null,
-        it.plant ? "Plant: " + it.plant : null,
-        it.location ? "Location: " + it.location : null
-      ].filter(Boolean).join(" | ");
+    var totalItems = items.length;
+    var subject = "Fleet Paperwork Reminder (" + totalItems + " items)";
 
-      return "\u2022 Reg: " + it.reg + " \u2014 " + it.doc + " \u2014 Date: " + it.date + " \u2014 " + tag + (meta ? " \u2014 " + meta : "");
-    });
+    // Clean format: Reg# — Model — DocType — days info
+    var formatLine = function(item) {
+      var prefix = "\u2022 " + item.reg + " \u2014 " + (item.model || "N/A") + " \u2014 " + item.doc + " \u2014 ";
+      if (item.daysLeft < 0) {
+        return prefix + Math.abs(item.daysLeft) + " day(s) overdue";
+      } else if (item.daysLeft === 0) {
+        return prefix + "Expires today";
+      } else {
+        return prefix + item.daysLeft + " day(s) left";
+      }
+    };
 
-    var warnings = underInspectionByRecipient.get(recipientEmail) || [];
-    var warningBlock = warnings.length
-      ? "\n\n\u26A0 UNDER INSPECTION (yellow-highlighted):\n" + warnings.map(function(w) { return "- " + w; }).join("\n")
-      : "";
+    var body = "Fleet Paperwork Status\n";
+    body += "======================\n";
 
-    var body =
-      "These fleet items need action:\n\n" +
-      lines.join("\n") +
-      "\n\nReminder windows: 30 / 14 / 7 / 1 days + overdue." +
-      "\n\u2014 Automated reminder" + warningBlock;
+    if (pastGrace.length > 0) {
+      body += "\n\u274C PAST GRACE PERIOD (>" + GRACE_PERIOD_DAYS + " days overdue) \u2014 " + pastGrace.length + " item(s):\n";
+      body += "----------------------------------------------\n";
+      for (var p = 0; p < pastGrace.length; p++) body += formatLine(pastGrace[p]) + "\n";
+    }
 
-    // ADJUSTMENT 2: try/catch so one failure doesn't abort all emails
+    if (inGrace.length > 0) {
+      body += "\n\u26A0\uFE0F IN GRACE PERIOD (0\u2013" + GRACE_PERIOD_DAYS + " days overdue) \u2014 " + inGrace.length + " item(s):\n";
+      body += "----------------------------------------------\n";
+      for (var g = 0; g < inGrace.length; g++) body += formatLine(inGrace[g]) + "\n";
+    }
+
+    if (underInspection.length > 0) {
+      body += "\n\uD83D\uDD0D UNDER INSPECTION \u2014 " + underInspection.length + " item(s):\n";
+      body += "----------------------------------------------\n";
+      for (var u = 0; u < underInspection.length; u++) body += formatLine(underInspection[u]) + "\n";
+    }
+
+    if (closeToExpiry.length > 0) {
+      body += "\n\uD83D\uDCC5 CLOSE TO EXPIRY (within 30 days) \u2014 " + closeToExpiry.length + " item(s):\n";
+      body += "----------------------------------------------\n";
+      for (var c = 0; c < closeToExpiry.length; c++) body += formatLine(closeToExpiry[c]) + "\n";
+    }
+
+    body += "\n\u2014 Automated Fleet Reminder";
+
     try {
       GmailApp.sendEmail(recipientEmail, subject, body);
-      // Log each item that was notified
       for (var li = 0; li < items.length; li++) {
         logNotification(ss, items[li].reg, items[li].doc, items[li].daysLeft, recipientEmail, "Sent");
       }
@@ -365,22 +349,15 @@ function sendExpiryReminders() {
       }
     }
 
-    // Optional escalation to manager if overdue items exist
-    if (ESCALATION_EMAIL) {
-      var overdue = items.filter(function(x) { return x.daysLeft < 0; });
-      if (overdue.length) {
-        var escSubject = "OVERDUE fleet paperwork (" + overdue.length + ") \u2014 " + recipientEmail;
-        var escBody =
-          "Overdue items included in reminder to " + recipientEmail + ":\n\n" +
-          overdue.map(function(it) {
-            return "\u2022 Reg: " + it.reg + " \u2014 " + it.doc + " \u2014 Date: " + it.date + " (" + Math.abs(it.daysLeft) + " day(s) overdue)";
-          }).join("\n");
-
-        try {
-          GmailApp.sendEmail(ESCALATION_EMAIL, escSubject, escBody);
-        } catch (e) {
-          Logger.log("Failed to send escalation to " + ESCALATION_EMAIL + ": " + e.message);
-        }
+    // Optional escalation for anything past grace period
+    if (ESCALATION_EMAIL && pastGrace.length > 0) {
+      var escSubject = "PAST GRACE PERIOD \u2014 " + pastGrace.length + " fleet item(s)";
+      var escBody = "These items are past the " + GRACE_PERIOD_DAYS + "-day grace period:\n\n";
+      for (var ep = 0; ep < pastGrace.length; ep++) escBody += formatLine(pastGrace[ep]) + "\n";
+      try {
+        GmailApp.sendEmail(ESCALATION_EMAIL, escSubject, escBody);
+      } catch (e) {
+        Logger.log("Failed to send escalation to " + ESCALATION_EMAIL + ": " + e.message);
       }
     }
   }
