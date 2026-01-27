@@ -135,6 +135,8 @@ function logNotification(ss, reg, doc, daysLeft, recipient, status) {
 function sendExpiryReminders() {
   // --- Duplicate-run guard ---
   // Prevents double emails if the trigger fires more than once per day.
+  // UNCOMMENT the block below when done testing to re-enable once-per-day limit.
+  /*
   var props = PropertiesService.getScriptProperties();
   var todayKey = Utilities.formatDate(new Date(), SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone(), "yyyy-MM-dd");
   var lastRun = props.getProperty("lastRunDate");
@@ -142,6 +144,7 @@ function sendExpiryReminders() {
     Logger.log("Already ran today (" + todayKey + "). Skipping.");
     return;
   }
+  */
 
   const SHEET_NAME = "SCC"; // <-- CHANGE to your exact tab name
   const GRACE_PERIOD_DAYS = 30; // days after expiry before "past grace period"
@@ -363,5 +366,6 @@ function sendExpiryReminders() {
   }
 
   // Mark today as completed so duplicate runs are skipped
-  props.setProperty("lastRunDate", todayKey);
+  // UNCOMMENT when done testing:
+  // props.setProperty("lastRunDate", todayKey);
 }
