@@ -16,7 +16,7 @@
  * - UNDER INSPECTION  — yellow-highlighted date cells OR has Inspection Exp.Date
  * - CLOSE TO EXPIRY   — expires within next 30 days
  *
- * Each line: Reg# — Model — Document Type — Expiry Date — days left/overdue
+ * Each line: Reg# — Model — Document Type — days left/overdue
  */
 
 // ============================================================
@@ -307,9 +307,9 @@ function sendExpiryReminders() {
     var totalItems = items.length;
     var subject = "Fleet Paperwork Reminder (" + totalItems + " items)";
 
-    // Clean format: Reg# — Model — DocType — Expiry Date — days info
+    // Clean format: Reg# — Model — DocType — days info
     var formatLine = function(item) {
-      var prefix = "\u2022 " + item.reg + " \u2014 " + (item.model || "N/A") + " \u2014 " + item.doc + " \u2014 " + item.date + " \u2014 ";
+      var prefix = "\u2022 " + item.reg + " \u2014 " + (item.model || "N/A") + " \u2014 " + item.doc + " \u2014 ";
       if (item.daysLeft < 0) {
         return prefix + Math.abs(item.daysLeft) + " day(s) overdue";
       } else if (item.daysLeft === 0) {
