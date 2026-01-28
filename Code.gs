@@ -11,12 +11,12 @@
  * This works reliably when the color is actually set on the cell.
  *
  * Email sections:
- * - PAST GRACE PERIOD — expired more than 30 days ago
- * - IN GRACE PERIOD   — expired within last 30 days
+ * - EXPIRED           — more than 30 days past expiry
+ * - GRACE PERIOD      — less than 30 days past expiry
+ * - CLOSE TO EXPIRY   — 30 days or less until expiry
  * - UNDER INSPECTION  — yellow-highlighted date cells OR has Inspection Exp.Date
- * - CLOSE TO EXPIRY   — expires within next 30 days
  *
- * Each line: Reg# — Model — Document Type — Expiry Date — days left/overdue
+ * Each line: Reg# — Model — Document Type — days left/overdue
  */
 
 // ============================================================
@@ -276,40 +276,40 @@ function sendExpiryReminders() {
     var items = entry[1];
 
     // Sort into 4 buckets:
-    //   1. PAST GRACE PERIOD  — expired more than 30 days ago (daysLeft < -30)
-    //   2. IN GRACE PERIOD    — expired within last 30 days (-30 <= daysLeft <= 0)
-    //   3. UNDER INSPECTION   — yellow-highlighted cells OR has Inspection Exp.Date
-    //   4. CLOSE TO EXPIRY    — not yet expired, within 30 days (1 <= daysLeft <= 30)
-    var pastGrace = [];
-    var inGrace = [];
-    var underInspection = [];
+    //   1. EXPIRED           — more than 30 days past expiry (daysLeft < -30)
+    //   2. GRACE PERIOD      — 0 to 30 days past expiry (-30 <= daysLeft <= 0)
+    //   3. CLOSE TO EXPIRY   — 30 days or less until expiry (1 <= daysLeft <= 30)
+    //   4. UNDER INSPECTION  — yellow bg OR has Inspection Exp.Date
+    var expired = [];
+    var gracePeriod = [];
     var closeToExpiry = [];
+    var underInspection = [];
 
     for (var j = 0; j < items.length; j++) {
       var it = items[j];
       if (it.underInspection) {
         underInspection.push(it);
       } else if (it.daysLeft < -30) {
-        pastGrace.push(it);
+        expired.push(it);
       } else if (it.daysLeft <= 0) {
-        inGrace.push(it);
+        gracePeriod.push(it);
       } else {
         closeToExpiry.push(it);
       }
     }
 
     // Sort each bucket by urgency (most urgent first)
-    pastGrace.sort(function(a, b) { return a.daysLeft - b.daysLeft; });
-    inGrace.sort(function(a, b) { return a.daysLeft - b.daysLeft; });
-    underInspection.sort(function(a, b) { return a.daysLeft - b.daysLeft; });
+    expired.sort(function(a, b) { return a.daysLeft - b.daysLeft; });
+    gracePeriod.sort(function(a, b) { return a.daysLeft - b.daysLeft; });
     closeToExpiry.sort(function(a, b) { return a.daysLeft - b.daysLeft; });
+    underInspection.sort(function(a, b) { return a.daysLeft - b.daysLeft; });
 
     var totalItems = items.length;
     var subject = "Fleet Paperwork Reminder (" + totalItems + " items)";
 
-    // Clean format: Reg# — Model — DocType — Expiry Date — days info
+    // Format: Reg# — Model — DocType — days info
     var formatLine = function(item) {
-      var prefix = "\u2022 " + item.reg + " \u2014 " + (item.model || "N/A") + " \u2014 " + item.doc + " \u2014 " + item.date + " \u2014 ";
+      var prefix = "  " + item.reg + " \u2014 " + (item.model || "N/A") + " \u2014 " + item.doc + " \u2014 ";
       if (item.daysLeft < 0) {
         return prefix + Math.abs(item.daysLeft) + " day(s) overdue";
       } else if (item.daysLeft === 0) {
@@ -319,34 +319,52 @@ function sendExpiryReminders() {
       }
     };
 
-    var body = "Fleet Paperwork Status\n";
-    body += "======================\n";
+    var separator = "================================================\n";
 
-    if (pastGrace.length > 0) {
-      body += "\n\u274C PAST GRACE PERIOD (>" + GRACE_PERIOD_DAYS + " days overdue) \u2014 " + pastGrace.length + " item(s):\n";
-      body += "----------------------------------------------\n";
-      for (var p = 0; p < pastGrace.length; p++) body += formatLine(pastGrace[p]) + "\n";
+    var body = "";
+    body += separator;
+    body += "       FLEET PAPERWORK STATUS\n";
+    body += separator;
+
+    if (expired.length > 0) {
+      body += "\n";
+      body += "EXPIRED  (" + expired.length + ")\n";
+      body += "More than " + GRACE_PERIOD_DAYS + " days past expiry\n";
+      body += "------------------------------------------------\n";
+      for (var p = 0; p < expired.length; p++) body += formatLine(expired[p]) + "\n";
+      body += "\n";
     }
 
-    if (inGrace.length > 0) {
-      body += "\n\u26A0\uFE0F IN GRACE PERIOD (0\u2013" + GRACE_PERIOD_DAYS + " days overdue) \u2014 " + inGrace.length + " item(s):\n";
-      body += "----------------------------------------------\n";
-      for (var g = 0; g < inGrace.length; g++) body += formatLine(inGrace[g]) + "\n";
-    }
-
-    if (underInspection.length > 0) {
-      body += "\n\uD83D\uDD0D UNDER INSPECTION \u2014 " + underInspection.length + " item(s):\n";
-      body += "----------------------------------------------\n";
-      for (var u = 0; u < underInspection.length; u++) body += formatLine(underInspection[u]) + "\n";
+    if (gracePeriod.length > 0) {
+      body += "\n";
+      body += "GRACE PERIOD  (" + gracePeriod.length + ")\n";
+      body += "Less than " + GRACE_PERIOD_DAYS + " days past expiry\n";
+      body += "------------------------------------------------\n";
+      for (var g = 0; g < gracePeriod.length; g++) body += formatLine(gracePeriod[g]) + "\n";
+      body += "\n";
     }
 
     if (closeToExpiry.length > 0) {
-      body += "\n\uD83D\uDCC5 CLOSE TO EXPIRY (within 30 days) \u2014 " + closeToExpiry.length + " item(s):\n";
-      body += "----------------------------------------------\n";
+      body += "\n";
+      body += "CLOSE TO EXPIRY  (" + closeToExpiry.length + ")\n";
+      body += "30 days or less until expiry\n";
+      body += "------------------------------------------------\n";
       for (var c = 0; c < closeToExpiry.length; c++) body += formatLine(closeToExpiry[c]) + "\n";
+      body += "\n";
     }
 
-    body += "\n\u2014 Automated Fleet Reminder";
+    if (underInspection.length > 0) {
+      body += "\n";
+      body += "UNDER INSPECTION  (" + underInspection.length + ")\n";
+      body += "Currently going through inspection\n";
+      body += "------------------------------------------------\n";
+      for (var u = 0; u < underInspection.length; u++) body += formatLine(underInspection[u]) + "\n";
+      body += "\n";
+    }
+
+    body += separator;
+    body += "Automated Fleet Reminder\n";
+    body += separator;
 
     try {
       GmailApp.sendEmail(recipientEmail, subject, body);
@@ -360,11 +378,11 @@ function sendExpiryReminders() {
       }
     }
 
-    // Optional escalation for anything past grace period
-    if (ESCALATION_EMAIL && pastGrace.length > 0) {
-      var escSubject = "PAST GRACE PERIOD \u2014 " + pastGrace.length + " fleet item(s)";
+    // Optional escalation for expired items
+    if (ESCALATION_EMAIL && expired.length > 0) {
+      var escSubject = "EXPIRED \u2014 " + expired.length + " fleet item(s)";
       var escBody = "These items are past the " + GRACE_PERIOD_DAYS + "-day grace period:\n\n";
-      for (var ep = 0; ep < pastGrace.length; ep++) escBody += formatLine(pastGrace[ep]) + "\n";
+      for (var ep = 0; ep < expired.length; ep++) escBody += formatLine(expired[ep]) + "\n";
       try {
         GmailApp.sendEmail(ESCALATION_EMAIL, escSubject, escBody);
       } catch (e) {
