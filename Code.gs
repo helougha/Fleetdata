@@ -16,7 +16,7 @@
  * - CLOSE TO EXPIRY   — 30 days or less until expiry
  * - UNDER INSPECTION  — yellow-highlighted date cells OR has Inspection Exp.Date
  *
- * Each line: Reg# — Model — Document Type — days left/overdue
+ * Each line: Reg# — Model — Exp/Insp: date — days info | Plant | Location
  */
 
 // ============================================================
@@ -172,6 +172,8 @@ function sendExpiryReminders() {
   const iExpiry = idx("Expiry Date");
   const iInspection = idx("Inspection Exp.Date");
   const iModel = idx("Model");
+  const iPlant = idx("Plant");
+  const iLocation = idx("Location");
 
   ["Reg #", "Expiry Date"].forEach(function(col) {
     if (idx(col) === -1) throw new Error("Missing required column: " + col);
@@ -203,7 +205,7 @@ function sendExpiryReminders() {
     perRecipient.get(e).push(item);
   };
 
-  var evaluateDateField = function(dateRaw, docLabel, reg, model, isUnderInspection) {
+  var evaluateDateField = function(dateRaw, docLabel, reg, model, plant, location, isUnderInspection) {
     if (!dateRaw) return null;
 
     var d;
@@ -226,6 +228,8 @@ function sendExpiryReminders() {
       doc: docLabel,
       date: Utilities.formatDate(d, tz, "dd/MM/yyyy"),
       daysLeft: daysLeft,
+      plant: plant,
+      location: location,
       underInspection: isUnderInspection || false
     };
   };
@@ -237,6 +241,8 @@ function sendExpiryReminders() {
     if (!reg) continue;
 
     var model = (iModel !== -1 && row[iModel]) ? String(row[iModel]).trim() : "";
+    var plant = (iPlant !== -1 && row[iPlant]) ? String(row[iPlant]).trim() : "";
+    var location = (iLocation !== -1 && row[iLocation]) ? String(row[iLocation]).trim() : "";
 
     var rowIdx = r - 1; // formatting arrays start at row 2
 
@@ -257,10 +263,10 @@ function sendExpiryReminders() {
 
     var expItem = expiryFontIsRed
       ? null
-      : evaluateDateField(row[iExpiry], "Expiry Date", reg, model, isUnderInspection);
+      : evaluateDateField(row[iExpiry], "Expiry Date", reg, model, plant, location, isUnderInspection);
 
     var inspItem = (iInspection !== -1 && !inspFontIsRed)
-      ? evaluateDateField(row[iInspection], "Inspection Exp.Date", reg, model, inspBgIsYellow)
+      ? evaluateDateField(row[iInspection], "Inspection Exp.Date", reg, model, plant, location, inspBgIsYellow)
       : null;
 
     for (var ri = 0; ri < DEFAULT_RECIPIENTS.length; ri++) {
@@ -307,16 +313,22 @@ function sendExpiryReminders() {
     var totalItems = items.length;
     var subject = "Fleet Paperwork Reminder (" + totalItems + " items)";
 
-    // Format: Reg# — Model — DocType — days info
+    // Format: Reg# — Model — Date — days info | Plant | Location
     var formatLine = function(item) {
-      var prefix = "  " + item.reg + " \u2014 " + (item.model || "N/A") + " \u2014 " + item.doc + " \u2014 ";
+      // Short label for the date type
+      var dateLabel = (item.doc === "Inspection Exp.Date") ? "Insp" : "Exp";
+      var line = "  " + item.reg + " \u2014 " + (item.model || "N/A") + " \u2014 " + dateLabel + ": " + item.date + " \u2014 ";
       if (item.daysLeft < 0) {
-        return prefix + Math.abs(item.daysLeft) + " day(s) overdue";
+        line += "OVERDUE by " + Math.abs(item.daysLeft) + " day(s)";
       } else if (item.daysLeft === 0) {
-        return prefix + "Expires today";
+        line += "Expires TODAY";
       } else {
-        return prefix + item.daysLeft + " day(s) left";
+        line += item.daysLeft + " day(s) left";
       }
+      // Append Plant and Location if available
+      if (item.plant) line += " | Plant: " + item.plant;
+      if (item.location) line += " | Location: " + item.location;
+      return line;
     };
 
     var separator = "================================================\n";
