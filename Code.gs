@@ -3,7 +3,7 @@
  *
  * Rules:
  * 1) If the DATE CELL's FONT color is red -> EXCLUDE that document from notifications.
- * 2) If the DATE CELL's BACKGROUND is yellow -> still notify, but add a warning: "under inspection".
+ * 2) If the DATE CELL's BACKGROUND is yellow OR Inspection Exp.Date has a date -> "under inspection".
  *
  * IMPORTANT NOTE:
  * If your red/yellow is applied ONLY via Conditional Formatting,
@@ -13,10 +13,10 @@
  * Email sections:
  * - PAST GRACE PERIOD — expired more than 30 days ago
  * - IN GRACE PERIOD   — expired within last 30 days
- * - UNDER INSPECTION  — yellow-highlighted date cells
+ * - UNDER INSPECTION  — yellow-highlighted date cells OR has Inspection Exp.Date
  * - CLOSE TO EXPIRY   — expires within next 30 days
  *
- * Each line: Reg# — Model — Document Type — days left/overdue
+ * Each line: Reg# — Model — Document Type — Expiry Date — days left/overdue
  */
 
 // ============================================================
@@ -28,6 +28,9 @@ function onOpen() {
     .createMenu("Fleet Reminders")
     .addItem("Send Reminders Now", "sendExpiryReminders")
     .addItem("Send Test Email", "sendTestEmail")
+    .addSeparator()
+    .addItem("Create Renewal Form", "createRenewalForm")
+    .addItem("Refresh Form Dropdown", "refreshRenewalFormDropdown")
     .addSeparator()
     .addItem("Create Daily Trigger (7 AM)", "createDailyTrigger")
     .addItem("Remove All Triggers", "removeAllTriggers")
@@ -221,6 +224,7 @@ function sendExpiryReminders() {
       reg: reg,
       model: model,
       doc: docLabel,
+      date: Utilities.formatDate(d, tz, "dd/MM/yyyy"),
       daysLeft: daysLeft,
       underInspection: isUnderInspection || false
     };
@@ -247,9 +251,13 @@ function sendExpiryReminders() {
       inspBgIsYellow = isBgYellow(inspBg[rowIdx][0]);
     }
 
+    // Under inspection if: yellow bg on expiry cell OR Inspection Exp.Date has a date
+    var hasInspectionDate = (iInspection !== -1 && row[iInspection] instanceof Date);
+    var isUnderInspection = expiryBgIsYellow || hasInspectionDate;
+
     var expItem = expiryFontIsRed
       ? null
-      : evaluateDateField(row[iExpiry], "Expiry Date", reg, model, expiryBgIsYellow);
+      : evaluateDateField(row[iExpiry], "Expiry Date", reg, model, isUnderInspection);
 
     var inspItem = (iInspection !== -1 && !inspFontIsRed)
       ? evaluateDateField(row[iInspection], "Inspection Exp.Date", reg, model, inspBgIsYellow)
@@ -270,7 +278,7 @@ function sendExpiryReminders() {
     // Sort into 4 buckets:
     //   1. PAST GRACE PERIOD  — expired more than 30 days ago (daysLeft < -30)
     //   2. IN GRACE PERIOD    — expired within last 30 days (-30 <= daysLeft <= 0)
-    //   3. UNDER INSPECTION   — yellow-highlighted cells (any daysLeft)
+    //   3. UNDER INSPECTION   — yellow-highlighted cells OR has Inspection Exp.Date
     //   4. CLOSE TO EXPIRY    — not yet expired, within 30 days (1 <= daysLeft <= 30)
     var pastGrace = [];
     var inGrace = [];
@@ -299,9 +307,9 @@ function sendExpiryReminders() {
     var totalItems = items.length;
     var subject = "Fleet Paperwork Reminder (" + totalItems + " items)";
 
-    // Clean format: Reg# — Model — DocType — days info
+    // Clean format: Reg# — Model — DocType — Expiry Date — days info
     var formatLine = function(item) {
-      var prefix = "\u2022 " + item.reg + " \u2014 " + (item.model || "N/A") + " \u2014 " + item.doc + " \u2014 ";
+      var prefix = "\u2022 " + item.reg + " \u2014 " + (item.model || "N/A") + " \u2014 " + item.doc + " \u2014 " + item.date + " \u2014 ";
       if (item.daysLeft < 0) {
         return prefix + Math.abs(item.daysLeft) + " day(s) overdue";
       } else if (item.daysLeft === 0) {
@@ -368,4 +376,228 @@ function sendExpiryReminders() {
   // Mark today as completed so duplicate runs are skipped
   // UNCOMMENT when done testing:
   // props.setProperty("lastRunDate", todayKey);
+}
+
+
+// ============================================================
+// GOOGLE FORM — Renewal Submissions
+// ============================================================
+
+/**
+ * Creates a Google Form for submitting registration renewals.
+ * Populates the Reg # dropdown from the sheet, adds Document Type
+ * dropdown, a date field for new expiry, and optional notes.
+ * Also installs the onFormSubmit trigger automatically.
+ */
+function createRenewalForm() {
+  var SHEET_NAME = "SCC";
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) throw new Error("Sheet not found: " + SHEET_NAME);
+
+  var data = sheet.getDataRange().getValues();
+  var headers = data[0].map(function(h) { return String(h).replace(/\s+/g, " ").trim(); });
+  var iReg = headers.indexOf("Reg #");
+  var iModel = headers.indexOf("Model");
+
+  // Collect unique Reg # values with model names for the dropdown
+  var regOptions = [];
+  var seen = {};
+  for (var r = 1; r < data.length; r++) {
+    var reg = String(data[r][iReg] || "").trim();
+    if (!reg || seen[reg]) continue;
+    seen[reg] = true;
+    var model = (iModel !== -1 && data[r][iModel]) ? String(data[r][iModel]).trim() : "";
+    regOptions.push(model ? reg + " (" + model + ")" : reg);
+  }
+
+  if (regOptions.length === 0) {
+    SpreadsheetApp.getUi().alert("No machines found in the sheet. Add some data first.");
+    return;
+  }
+
+  // Create the form
+  var form = FormApp.create("Fleet Renewal Form");
+  form.setDescription(
+    "Submit a renewal for a machine registration, mulkiya, insurance, or inspection.\n" +
+    "The spreadsheet will be updated automatically when you submit."
+  );
+
+  // Reg # dropdown
+  var regItem = form.addListItem();
+  regItem.setTitle("Machine (Reg #)")
+    .setHelpText("Select the machine to renew")
+    .setChoiceValues(regOptions)
+    .setRequired(true);
+
+  // Document type dropdown
+  var docItem = form.addListItem();
+  docItem.setTitle("Document Type")
+    .setHelpText("Which document is being renewed?")
+    .setChoiceValues(["Expiry Date", "Inspection Exp.Date"])
+    .setRequired(true);
+
+  // New expiry date
+  var dateItem = form.addDateItem();
+  dateItem.setTitle("New Expiry Date")
+    .setHelpText("The new expiry date after renewal (dd/MM/yyyy)")
+    .setRequired(true);
+
+  // Notes
+  var notesItem = form.addParagraphTextItem();
+  notesItem.setTitle("Notes")
+    .setHelpText("Optional: any notes about the renewal");
+
+  // Link form responses to this spreadsheet
+  form.setDestination(FormApp.DestinationType.SPREADSHEET, ss.getId());
+
+  // Install the form submit trigger
+  ScriptApp.newTrigger("onRenewalFormSubmit")
+    .forForm(form)
+    .onFormSubmit()
+    .create();
+
+  var formUrl = form.getPublishedUrl();
+  var editUrl = form.getEditUrl();
+
+  SpreadsheetApp.getUi().alert(
+    "Renewal Form Created!\n\n" +
+    "Form URL (share this):\n" + formUrl + "\n\n" +
+    "Edit URL:\n" + editUrl + "\n\n" +
+    "When someone submits the form, the matching row in SCC will be updated automatically."
+  );
+
+  Logger.log("Form URL: " + formUrl);
+  Logger.log("Edit URL: " + editUrl);
+}
+
+/**
+ * Handles form submissions — finds the matching row and updates the expiry date.
+ * Triggered automatically when the renewal form is submitted.
+ */
+function onRenewalFormSubmit(e) {
+  var SHEET_NAME = "SCC";
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) return;
+
+  var responses = e.response.getItemResponses();
+  var regRaw = "";
+  var docType = "";
+  var newDate = null;
+  var notes = "";
+
+  for (var i = 0; i < responses.length; i++) {
+    var title = responses[i].getItem().getTitle();
+    var answer = responses[i].getResponse();
+
+    if (title === "Machine (Reg #)") {
+      // Extract just the Reg # (before the parentheses if model was appended)
+      regRaw = String(answer).replace(/\s*\(.*\)\s*$/, "").trim();
+    } else if (title === "Document Type") {
+      docType = String(answer).trim();
+    } else if (title === "New Expiry Date") {
+      newDate = new Date(answer);
+    } else if (title === "Notes") {
+      notes = String(answer || "").trim();
+    }
+  }
+
+  if (!regRaw || !docType || !newDate || isNaN(newDate.getTime())) {
+    Logger.log("Invalid form submission: reg=" + regRaw + ", doc=" + docType + ", date=" + newDate);
+    return;
+  }
+
+  // Find the matching row
+  var data = sheet.getDataRange().getValues();
+  var headers = data[0].map(function(h) { return String(h).replace(/\s+/g, " ").trim(); });
+  var iReg = headers.indexOf("Reg #");
+  var iExpiry = headers.indexOf("Expiry Date");
+  var iInspection = headers.indexOf("Inspection Exp.Date");
+
+  var targetCol = -1;
+  if (docType === "Expiry Date") {
+    targetCol = iExpiry;
+  } else if (docType === "Inspection Exp.Date") {
+    targetCol = iInspection;
+  }
+
+  if (targetCol === -1) {
+    Logger.log("Could not find column for document type: " + docType);
+    return;
+  }
+
+  var updated = false;
+  for (var r = 1; r < data.length; r++) {
+    var rowReg = String(data[r][iReg] || "").trim();
+    if (rowReg === regRaw) {
+      // Update the expiry date cell
+      sheet.getRange(r + 1, targetCol + 1).setValue(newDate);
+
+      // Clear yellow background if it was set (machine is no longer under inspection)
+      sheet.getRange(r + 1, targetCol + 1).setBackground(null);
+
+      // Log the renewal
+      logNotification(ss, regRaw, docType + " renewed", 0, "Form", "Renewed to " + Utilities.formatDate(newDate, ss.getSpreadsheetTimeZone(), "dd/MM/yyyy") + (notes ? " | " + notes : ""));
+
+      updated = true;
+      Logger.log("Updated " + regRaw + " " + docType + " to " + newDate);
+      break;
+    }
+  }
+
+  if (!updated) {
+    Logger.log("No matching row found for Reg #: " + regRaw);
+  }
+}
+
+/**
+ * Refreshes the Reg # dropdown in the renewal form with current sheet data.
+ * Run this after adding new machines to the sheet.
+ */
+function refreshRenewalFormDropdown() {
+  var SHEET_NAME = "SCC";
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) return;
+
+  var data = sheet.getDataRange().getValues();
+  var headers = data[0].map(function(h) { return String(h).replace(/\s+/g, " ").trim(); });
+  var iReg = headers.indexOf("Reg #");
+  var iModel = headers.indexOf("Model");
+
+  var regOptions = [];
+  var seen = {};
+  for (var r = 1; r < data.length; r++) {
+    var reg = String(data[r][iReg] || "").trim();
+    if (!reg || seen[reg]) continue;
+    seen[reg] = true;
+    var model = (iModel !== -1 && data[r][iModel]) ? String(data[r][iModel]).trim() : "";
+    regOptions.push(model ? reg + " (" + model + ")" : reg);
+  }
+
+  // Find the form linked to this spreadsheet
+  var triggers = ScriptApp.getProjectTriggers();
+  var formId = null;
+  for (var t = 0; t < triggers.length; t++) {
+    if (triggers[t].getHandlerFunction() === "onRenewalFormSubmit") {
+      formId = triggers[t].getTriggerSourceId();
+      break;
+    }
+  }
+
+  if (!formId) {
+    SpreadsheetApp.getUi().alert("No renewal form found. Create one first using the menu.");
+    return;
+  }
+
+  var form = FormApp.openById(formId);
+  var items = form.getItems();
+  for (var i = 0; i < items.length; i++) {
+    if (items[i].getTitle() === "Machine (Reg #)") {
+      items[i].asListItem().setChoiceValues(regOptions);
+      SpreadsheetApp.getUi().alert("Dropdown updated with " + regOptions.length + " machines.");
+      return;
+    }
+  }
 }
